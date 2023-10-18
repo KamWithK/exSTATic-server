@@ -1,0 +1,10 @@
+version: "3.8"
+
+services:
+  exSTATic-air:
+    image: ghcr.io/KamWithK/exSTATic-server:latest
+    working_dir: /backend
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./backend/:/backend/
