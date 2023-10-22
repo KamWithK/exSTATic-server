@@ -4,6 +4,8 @@ services:
   exSTATic-air:
     image: ghcr.io/kamwithk/exstatic-server:main
     working_dir: /backend
+    env_file:
+      - .env
     ports:
       - "8080:8080"
     volumes:
