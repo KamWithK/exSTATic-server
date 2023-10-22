@@ -20,3 +20,4 @@ go.work
 # Other randoms
 .DS_Store
 **/tmp
+.env
