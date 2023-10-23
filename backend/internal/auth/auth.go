@@ -30,12 +30,20 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// Get Google token
-	code, verifier := r.FormValue("code"), r.FormValue("verifier")
+	state, code, verifier := r.FormValue("state"), r.FormValue("code"), r.FormValue("verifier")
 	_ = verifier // TODO: Remove once verifier works
+
+	if state != "state" {
+		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+		slog.Warn("invalid state")
+		return
+	}
+
 	token, err := GoogleOAuthConfig.Exchange(r.Context(), code)
 	if err != nil {
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		slog.Warn("could not exchange auth code", err)
+		return
 	}
 
 	// Get client to make requests with
