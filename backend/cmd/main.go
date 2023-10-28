@@ -13,6 +13,18 @@ import (
 	"github.com/KamWithK/exSTATic-backend/internal/settings"
 )
 
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+
+		next.ServeHTTP(w, r)
+	})
+}
+
+func EmptyHandler(w http.ResponseWriter, r *http.Request) {
+}
+
 func main() {
 	err := database.InitDB(os.Getenv("DB_URL"))
 	if err != nil {
@@ -20,11 +32,21 @@ func main() {
 	}
 	defer database.DB.Close()
 
-	http.HandleFunc("/", settings.SettingsHandler)
-	http.HandleFunc("/login", auth.LoginHandler)
-	http.HandleFunc("/callback", auth.CallbackHandler)
+	mux := http.NewServeMux()
 
-	httpErr := http.ListenAndServe(":8080", nil)
+	// Static content
+	fs := http.FileServer(http.Dir("../static"))
+	mux.Handle("/", fs)
+
+	// APIs
+	apiMux := http.NewServeMux()
+	apiMux.HandleFunc("/settings", settings.SettingsHandler)
+	apiMux.HandleFunc("/login", auth.LoginHandler)
+	apiMux.HandleFunc("/callback", auth.CallbackHandler)
+	mux.Handle("/api/", http.StripPrefix("/api", apiMux))
+
+	// Serve
+	httpErr := http.ListenAndServe(":8080", corsMiddleware(mux))
 	if httpErr != nil {
 		slog.Error("http server error", httpErr)
 	}

@@ -15,7 +15,7 @@ import (
 var GoogleOAuthConfig = oauth2.Config{
 	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-	RedirectURL:  "http://localhost:8080/callback",
+	RedirectURL:  os.Getenv("DOMAIN_URL") + "/api/callback",
 	Scopes:       []string{"email", "profile", "openid"},
 	Endpoint:     endpoints.Google,
 }
@@ -105,4 +105,8 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Redirect back to the homepage
+	// TODO: Generate and send an api auth token
+	http.Redirect(w, r, os.Getenv("DOMAIN_URL"), http.StatusTemporaryRedirect)
 }
