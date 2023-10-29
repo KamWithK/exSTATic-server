@@ -2,114 +2,115 @@ package auth
 
 import (
 	// "encoding/base64"
+
+	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
-	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"strings"
+	"time"
 
 	"github.com/KamWithK/exSTATic-backend/internal/database"
+	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
-	"golang.org/x/oauth2/endpoints"
 )
 
-var GoogleOAuthConfig = oauth2.Config{
-	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
-	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-	RedirectURL:  os.Getenv("DOMAIN_URL") + "/api/callback",
-	Scopes:       []string{"email", "profile", "openid"},
-	Endpoint:     endpoints.Google,
+type Auth struct {
+	OAuthConfig oauth2.Config
+	Provider    *oidc.Provider
+	Verifier    oidc.IDTokenVerifier
 }
 
-func LoginHandler(w http.ResponseWriter, r *http.Request) {
-	// TODO: Get and use verifier challenge
-	// verifier := oauth2.GenerateVerifier()
-	// url := GoogleOAuthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline, oauth2.S256ChallengeOption(verifier))
-	url := GoogleOAuthConfig.AuthCodeURL("state", oauth2.AccessTypeOffline)
-	http.Redirect(w, r, url, http.StatusTemporaryRedirect)
+// Source: https://github.com/coreos/go-oidc/blob/v3/example/idtoken/app.go
+func randString(nByte int) (string, error) {
+	b := make([]byte, nByte)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-func CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	// Get Google token
-	state, code, verifier := r.FormValue("state"), r.FormValue("code"), r.FormValue("verifier")
-	_ = verifier // TODO: Remove once verifier works
+func (auth *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
+	// Create random state for this device
+	state, err := randString(16)
+	if err != nil {
+		slog.Error("could not create random string for OAuth2 state")
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
 
-	if state != "state" {
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	// Put state into cookie so it can be checked within the callback
+	cookie := &http.Cookie{
+		Name:     "state",
+		Value:    state,
+		MaxAge:   int(time.Hour.Seconds()),
+		Secure:   r.TLS != nil,
+		HttpOnly: true,
+	}
+	http.SetCookie(w, cookie)
+
+	// Initiate redirect to start login
+	http.Redirect(w, r, auth.OAuthConfig.AuthCodeURL(state), http.StatusTemporaryRedirect)
+}
+
+func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	// End by redirecting to the main page
+	defer http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+
+	// Get and check state matches
+	state, err := r.Cookie("state")
+	if err != nil {
+		slog.Warn("state not found")
+		return
+	}
+	if r.URL.Query().Get("state") != state.Value {
 		slog.Warn("invalid state")
 		return
 	}
 
-	// Get tokens
-	access_token, err := GoogleOAuthConfig.Exchange(r.Context(), code)
+	// Attempt token exchange
+	tokens, err := auth.OAuthConfig.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		slog.Warn("could not exchange auth code", err)
 		return
 	}
-	refresh_token := access_token.Extra("refresh_token").(string)
-	id_token := strings.Split(access_token.Extra("id_token").(string), ".")
 
-	if len(id_token) != 3 {
-		slog.Error("incorrect id token length, the id token should be comprised off a header, body and signature")
+	// Extract user info and claims
+	userInfo, err := auth.Provider.UserInfo(r.Context(), oauth2.StaticTokenSource(tokens))
+	if err != nil {
+		slog.Warn("could not get user info", err)
 		return
 	}
-	id_token_parts := make(map[int]map[string]interface{})
-
-	for index, part := range id_token[:2] {
-		part_json := make(map[string]interface{})
-		part_bytes, err := base64.RawStdEncoding.DecodeString(part)
-		if err != nil {
-			slog.Warn("could not base64 decode JWT", err)
-			return
-		}
-		err = json.Unmarshal(part_bytes, &part_json)
-		if err != nil {
-			slog.Warn("could not unmarshal JWT", err)
-			// return
-		}
-
-		id_token_parts[index] = part_json
+	var claims struct {
+		Name          string `json:"name"`
+		EmailVerified bool   `json:"email_verified"`
 	}
-
-	id_token_header := id_token_parts[0]
-	id_token_body := id_token_parts[1]
-
-	fmt.Println(id_token_header)
-	fmt.Println(id_token_body)
-	println(refresh_token)
+	userInfo.Claims(&claims)
 
 	// Parse user info
-	email := id_token_body["email"]
-	if email == "" {
+	if userInfo.Email == "" {
 		slog.Warn("no registered email")
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
-	name := id_token_body["name"]
+	if !claims.EmailVerified {
+		slog.Warn("email not verified")
+		return
+	}
 
 	// Check whether user registered in database
 	registered := false
-	err = database.DB.QueryRow("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)", email).Scan(&registered)
+	err = database.DB.QueryRow("SELECT EXISTS (SELECT 1 FROM users WHERE email = $1)", userInfo.Email).Scan(&registered)
 	if err != nil {
 		slog.Warn("database error during select user email exists: ", err)
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
 
 	// Add user if not pre-existing
 	if !registered {
-		_, err := database.DB.Exec("INSERT INTO users (email, name) VALUES ($1, $2)", email, name)
+		_, err := database.DB.Exec("INSERT INTO users (email, name) VALUES ($1, $2)", userInfo.Email, claims.Name)
 		if err != nil {
 			slog.Warn("database error during insert user: ", err)
-			http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 			return
 		}
 	}
-
-	// Redirect back to the homepage
-	// TODO: Generate and send an api auth token
-	http.Redirect(w, r, os.Getenv("DOMAIN_URL"), http.StatusTemporaryRedirect)
 }

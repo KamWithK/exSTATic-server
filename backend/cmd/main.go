@@ -1,17 +1,29 @@
 package main
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"os"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	_ "github.com/libsql/libsql-client-go/libsql"
+	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/endpoints"
 	_ "modernc.org/sqlite"
 
 	"github.com/KamWithK/exSTATic-backend/internal/auth"
 	"github.com/KamWithK/exSTATic-backend/internal/database"
 	"github.com/KamWithK/exSTATic-backend/internal/settings"
 )
+
+var GoogleOAuthConfig = oauth2.Config{
+	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+	RedirectURL:  os.Getenv("DOMAIN_URL") + "/api/callback",
+	Scopes:       []string{"email", "profile", "openid"},
+	Endpoint:     endpoints.Google,
+}
 
 func corsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,11 +50,23 @@ func main() {
 	fs := http.FileServer(http.Dir("../static"))
 	mux.Handle("/", fs)
 
+	// Auth configuration
+	provider, err := oidc.NewProvider(context.Background(), "https://accounts.google.com")
+	oidcConfig := &oidc.Config{
+		ClientID: os.Getenv("GOOGLE_CLIENT_ID"),
+	}
+	verifier := provider.Verifier(oidcConfig)
+	googleOIDCConfig := auth.Auth{
+		OAuthConfig: GoogleOAuthConfig,
+		Provider:    provider,
+		Verifier:    *verifier,
+	}
+
 	// APIs
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/settings", settings.SettingsHandler)
-	apiMux.HandleFunc("/login", auth.LoginHandler)
-	apiMux.HandleFunc("/callback", auth.CallbackHandler)
+	apiMux.HandleFunc("/login", googleOIDCConfig.LoginHandler)
+	apiMux.HandleFunc("/callback", googleOIDCConfig.CallbackHandler)
 	mux.Handle("/api/", http.StripPrefix("/api", apiMux))
 
 	// Serve
