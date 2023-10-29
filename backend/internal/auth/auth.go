@@ -1,11 +1,14 @@
 package auth
 
 import (
+	// "encoding/base64"
+	"encoding/base64"
 	"encoding/json"
-	"io"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/KamWithK/exSTATic-backend/internal/database"
 	"golang.org/x/oauth2"
@@ -39,53 +42,53 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	token, err := GoogleOAuthConfig.Exchange(r.Context(), code)
+	// Get tokens
+	access_token, err := GoogleOAuthConfig.Exchange(r.Context(), code)
 	if err != nil {
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		slog.Warn("could not exchange auth code", err)
 		return
 	}
+	refresh_token := access_token.Extra("refresh_token").(string)
+	id_token := strings.Split(access_token.Extra("id_token").(string), ".")
 
-	// Get client to make requests with
-	client := GoogleOAuthConfig.Client(r.Context(), token)
-
-	// User info request
-	resp, err := client.Get("https://www.googleapis.com/oauth2/v1/userinfo")
-	if err != nil {
-		slog.Warn("could not retrieve user info")
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
+	if len(id_token) != 3 {
+		slog.Error("incorrect id token length, the id token should be comprised off a header, body and signature")
 		return
 	}
-	defer resp.Body.Close()
+	id_token_parts := make(map[int]map[string]interface{})
 
-	// Read user info
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		slog.Warn("could not read user info")
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
-		return
+	for index, part := range id_token[:2] {
+		part_json := make(map[string]interface{})
+		part_bytes, err := base64.RawStdEncoding.DecodeString(part)
+		if err != nil {
+			slog.Warn("could not base64 decode JWT", err)
+			return
+		}
+		err = json.Unmarshal(part_bytes, &part_json)
+		if err != nil {
+			slog.Warn("could not unmarshal JWT", err)
+			// return
+		}
+
+		id_token_parts[index] = part_json
 	}
+
+	id_token_header := id_token_parts[0]
+	id_token_body := id_token_parts[1]
+
+	fmt.Println(id_token_header)
+	fmt.Println(id_token_body)
+	println(refresh_token)
 
 	// Parse user info
-	var userInfo map[string]interface{}
-	err = json.Unmarshal(body, &userInfo)
-	if err != nil {
-		slog.Warn("could not parse user info")
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
-		return
-	}
-	email, ok := userInfo["email"].(string)
-	if !ok {
-		slog.Warn("could not get the users email")
-		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
-		return
-	}
+	email := id_token_body["email"]
 	if email == "" {
 		slog.Warn("no registered email")
 		http.Redirect(w, r, "/", http.StatusTemporaryRedirect)
 		return
 	}
-	name, ok := userInfo["name"].(string)
+	name := id_token_body["name"]
 
 	// Check whether user registered in database
 	registered := false
