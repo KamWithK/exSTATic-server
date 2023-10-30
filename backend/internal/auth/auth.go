@@ -31,26 +31,41 @@ func randString(nByte int) (string, error) {
 }
 
 func (auth *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
-	// Create random state for this device
+	// Create random state and nonce for this device
 	state, err := randString(16)
 	if err != nil {
 		slog.Error("could not create random string for OAuth2 state")
 		http.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
+	nonce, err := randString(16)
+	if err != nil {
+		slog.Error("could not create random string for OIDC nonce")
+		http.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
 
-	// Put state into cookie so it can be checked within the callback
-	cookie := &http.Cookie{
+	// Put state and nonce into cookies so they can be checked within the callback
+	stateCookie := &http.Cookie{
 		Name:     "state",
 		Value:    state,
 		MaxAge:   int(time.Hour.Seconds()),
 		Secure:   r.TLS != nil,
 		HttpOnly: true,
 	}
-	http.SetCookie(w, cookie)
+	nonceCookie := &http.Cookie{
+		Name:     "nonce",
+		Value:    nonce,
+		MaxAge:   int(time.Hour.Seconds()),
+		Secure:   r.TLS != nil,
+		HttpOnly: true,
+	}
+
+	http.SetCookie(w, stateCookie)
+	http.SetCookie(w, nonceCookie)
 
 	// Initiate redirect to start login
-	http.Redirect(w, r, auth.OAuthConfig.AuthCodeURL(state), http.StatusTemporaryRedirect)
+	http.Redirect(w, r, auth.OAuthConfig.AuthCodeURL(state, oidc.Nonce(nonce)), http.StatusTemporaryRedirect)
 }
 
 func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
@@ -68,10 +83,32 @@ func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get the nonce
+	nonce, err := r.Cookie("nonce")
+	if err != nil {
+		slog.Warn("nonce not found")
+	}
+
 	// Attempt token exchange
 	tokens, err := auth.OAuthConfig.Exchange(r.Context(), r.URL.Query().Get("code"))
 	if err != nil {
 		slog.Warn("could not exchange auth code", err)
+		return
+	}
+
+	// Extract and verify the nonce
+	rawIDToken, ok := tokens.Extra("id_token").(string)
+	if !ok {
+		slog.Warn("failed to parse ID token", err)
+		return
+	}
+	idToken, err := auth.Verifier.Verify(r.Context(), rawIDToken)
+	if err != nil {
+		slog.Warn("id token verification failed")
+		return
+	}
+	if idToken.Nonce != nonce.Value {
+		slog.Warn("invalid OIDC nonce")
 		return
 	}
 
