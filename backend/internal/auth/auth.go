@@ -112,7 +112,7 @@ func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get refresh token
-	refresh_token := tokens.Extra("refresh_token").(string)
+	refreshToken := tokens.Extra("refresh_token").(string)
 
 	// Extract user info and claims
 	userInfo, err := auth.Provider.UserInfo(r.Context(), oauth2.StaticTokenSource(tokens))
@@ -156,7 +156,7 @@ func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// Send id token and refresh token back as cookies
 	refreshCookie := &http.Cookie{
 		Name:     "refresh_token",
-		Value:    refresh_token,
+		Value:    refreshToken,
 		MaxAge:   int(time.Hour.Seconds()),
 		Secure:   r.TLS != nil,
 		HttpOnly: true,
