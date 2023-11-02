@@ -1,8 +1,7 @@
 package auth
 
 import (
-	// "encoding/base64"
-
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"io"
@@ -65,7 +64,7 @@ func (auth *Auth) LoginHandler(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, nonceCookie)
 
 	// Initiate redirect to start login
-	http.Redirect(w, r, auth.OAuthConfig.AuthCodeURL(state, oidc.Nonce(nonce)), http.StatusTemporaryRedirect)
+	http.Redirect(w, r, auth.OAuthConfig.AuthCodeURL(state, oidc.Nonce(nonce), oauth2.AccessTypeOffline), http.StatusTemporaryRedirect)
 }
 
 func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
@@ -112,6 +111,9 @@ func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Get refresh token
+	refresh_token := tokens.Extra("refresh_token").(string)
+
 	// Extract user info and claims
 	userInfo, err := auth.Provider.UserInfo(r.Context(), oauth2.StaticTokenSource(tokens))
 	if err != nil {
@@ -150,4 +152,110 @@ func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+
+	// Send id token and refresh token back as cookies
+	refreshCookie := &http.Cookie{
+		Name:     "refresh_token",
+		Value:    refresh_token,
+		MaxAge:   int(time.Hour.Seconds()),
+		Secure:   r.TLS != nil,
+		HttpOnly: true,
+	}
+	idCookie := &http.Cookie{
+		Name:     "id_token",
+		Value:    rawIDToken,
+		MaxAge:   int(time.Hour.Seconds()),
+		Secure:   r.TLS != nil,
+		HttpOnly: true,
+	}
+
+	// Set the cookies
+	http.SetCookie(w, refreshCookie)
+	http.SetCookie(w, idCookie)
+}
+
+func (auth *Auth) AuthMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Context for future use
+		ctx := r.Context()
+
+		// Ensure users first need to login
+		authenticated := false
+		defer func() {
+			if !authenticated {
+				http.Redirect(w, r, "/login", http.StatusTemporaryRedirect)
+			} else {
+				next.ServeHTTP(w, r.WithContext(ctx))
+			}
+		}()
+
+		// Get tokens from cookies
+		rawIDToken, err := r.Cookie("id_token")
+		if err != nil {
+			slog.Warn("id token not found", err)
+			slog.Info("will continue in case refresh token works instead")
+			// return
+		}
+		refreshToken, err := r.Cookie("refresh_token")
+		if err != nil {
+			slog.Warn("refresh token not found")
+			return
+		}
+
+		// Reconstruct old token
+		oldToken := &oauth2.Token{
+			RefreshToken: refreshToken.Value,
+		}
+		if rawIDToken != nil {
+			oldToken = oldToken.WithExtra(map[string]string{"id_token": rawIDToken.Value})
+		}
+
+		// Refresh token when needed
+		tokenSource := auth.OAuthConfig.TokenSource(ctx, oldToken)
+		token, err := tokenSource.Token()
+		if err != nil {
+			slog.Warn("failed to refresh token", err)
+			return
+		}
+
+		// Verify id token
+		idToken, err := auth.Verifier.Verify(ctx, token.Extra("id_token").(string))
+		if err != nil {
+			slog.Warn("id token verification failed", err)
+			return
+		}
+
+		// Get user claims and ensure they're valid
+		var claims struct {
+			Email         string `json:"email"`
+			EmailVerified bool   `json:"email_verified"`
+		}
+		if err := idToken.Claims(&claims); err != nil {
+			slog.Warn("claims from OIDC id token are invalid", err)
+			return
+		}
+		if claims.Email == "" {
+			slog.Warn("no registered email")
+			return
+		}
+		if !claims.EmailVerified {
+			slog.Warn("email not verified")
+			return
+		}
+
+		// Make sure user is name
+		name := ""
+		err = database.DB.QueryRow("1 FROM users WHERE email = $1", claims.Email).Scan(&name)
+		if err != nil {
+			slog.Warn("database error during select user: ", err)
+			return
+		}
+
+		// Add user email into context for future use
+		ctx = context.WithValue(ctx, "email", claims.Email)
+		ctx = context.WithValue(ctx, "name", name)
+
+		// Set the user as authenticated
+		authenticated = true
+	})
 }

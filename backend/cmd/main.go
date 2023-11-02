@@ -20,7 +20,7 @@ import (
 var GoogleOAuthConfig = oauth2.Config{
 	ClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 	ClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
-	RedirectURL:  os.Getenv("DOMAIN_URL") + "/api/callback",
+	RedirectURL:  os.Getenv("DOMAIN_URL") + "/callback",
 	Scopes:       []string{"email", "profile", "openid"},
 	Endpoint:     endpoints.Google,
 }
@@ -62,12 +62,14 @@ func main() {
 		Verifier:    *verifier,
 	}
 
+	// Login
+	mux.HandleFunc("/login", googleOIDCConfig.LoginHandler)
+	mux.HandleFunc("/callback", googleOIDCConfig.CallbackHandler)
+
 	// APIs
 	apiMux := http.NewServeMux()
 	apiMux.HandleFunc("/settings", settings.SettingsHandler)
-	apiMux.HandleFunc("/login", googleOIDCConfig.LoginHandler)
-	apiMux.HandleFunc("/callback", googleOIDCConfig.CallbackHandler)
-	mux.Handle("/api/", http.StripPrefix("/api", apiMux))
+	mux.Handle("/api/", http.StripPrefix("/api", googleOIDCConfig.AuthMiddleware(apiMux)))
 
 	// Serve
 	httpErr := http.ListenAndServe(":8080", corsMiddleware(mux))
