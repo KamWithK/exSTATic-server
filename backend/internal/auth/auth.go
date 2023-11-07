@@ -112,7 +112,11 @@ func (auth *Auth) CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Get refresh token
-	refreshToken := tokens.Extra("refresh_token").(string)
+	refreshToken, ok := tokens.Extra("refresh_token").(string)
+	if !ok {
+		slog.Warn("failed to parse refresh token", err)
+		return
+	}
 
 	// Extract user info and claims
 	userInfo, err := auth.Provider.UserInfo(r.Context(), oauth2.StaticTokenSource(tokens))
@@ -245,9 +249,14 @@ func (auth *Auth) AuthMiddleware(next http.Handler) http.Handler {
 
 		// Make sure user is name
 		name := ""
-		err = database.DB.QueryRow("1 FROM users WHERE email = $1", claims.Email).Scan(&name)
+		user_id := -1
+		err = database.DB.QueryRow("SELECT rowid, name FROM users WHERE email = $1", claims.Email).Scan(&user_id, &name)
 		if err != nil {
-			slog.Warn("database error during select user: ", err)
+			slog.Warn("database error during select user", err)
+			return
+		}
+		if user_id < 0 {
+			slog.Error("invalid user id or user id not found: ", user_id)
 			return
 		}
 
