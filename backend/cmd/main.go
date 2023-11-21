@@ -14,7 +14,6 @@ import (
 
 	"github.com/KamWithK/exSTATic-backend/internal/auth"
 	"github.com/KamWithK/exSTATic-backend/internal/database"
-	"github.com/KamWithK/exSTATic-backend/internal/settings"
 )
 
 var GoogleOAuthConfig = oauth2.Config{
@@ -68,7 +67,6 @@ func main() {
 
 	// APIs
 	apiMux := http.NewServeMux()
-	apiMux.HandleFunc("/settings", settings.SettingsHandler)
 	mux.Handle("/api/", http.StripPrefix("/api", googleOIDCConfig.AuthMiddleware(apiMux)))
 
 	// Serve
